@@ -1,0 +1,45 @@
+#!/bin/bash
+FILE_SYSTEM=${file_system}
+DISK_PARTITION=${disk_partition}
+MOUNT_POINT_NAME=${mount_point_name}
+DISK_PARTITION2=sdd
+MOUNT_POINT_NAME2=mnt2
+
+echo " "
+echo "...........###########################################.........."
+echo ".........................MOUNT DISKS......................"
+echo "...........###########################################.........."
+echo " "
+echo "###- Partition and Format the disk1 -###"
+sudo parted /dev/$DISK_PARTITION --script mklabel gpt mkpart "$FILE_SYSTEM"part $FILE_SYSTEM 0% 100%
+sudo mkfs.$FILE_SYSTEM /dev/"$DISK_PARTITION"1
+sudo partprobe /dev/"$DISK_PARTITION"1
+echo " "
+echo "###- Mount disk#1 -###"
+sudo mkdir /$MOUNT_POINT_NAME
+sudo mount /dev/"$DISK_PARTITION"1 /$MOUNT_POINT_NAME
+echo " "
+echo "###- Extract UUID and save it in variable -###"
+uuid1=$(sudo blkid | grep -i ""$DISK_PARTITION"1" | awk '{print $2}' | tr -d '"' | awk '{print $1"   /'$MOUNT_POINT_NAME'   '$FILE_SYSTEM'   defaults,nofail   1   2"}')
+echo " "
+echo "###- Partition and Format the disk2 -###"
+sudo parted /dev/$DISK_PARTITION2 --script mklabel gpt mkpart "$FILE_SYSTEM"part $FILE_SYSTEM 0% 100%
+sudo mkfs.$FILE_SYSTEM /dev/"$DISK_PARTITION2"1
+sudo partprobe /dev/"$DISK_PARTITION2"1
+echo " "
+echo "###- Mount the disk -###"
+sudo mkdir /$MOUNT_POINT_NAME2
+sudo mount /dev/"$DISK_PARTITION2"1 /$MOUNT_POINT_NAME2
+echo " "
+echo "###- Extract UUID and save it in variable -###"
+uuid2=$(sudo blkid | grep -i ""$DISK_PARTITION2"1" | awk '{print $2}' | tr -d '"' | awk '{print $1"   /'$MOUNT_POINT_NAME2'   '$FILE_SYSTEM'   defaults,nofail   1   2"}')
+echo " "
+echo "###- Backup of org fstab file -###"
+sudo cp /etc/fstab /etc/fstab_backup
+echo " "
+echo "###- Append UUIDs to fstab -###"
+echo $uuid1 | sudo tee -a /etc/fstab
+echo $uuid2 | sudo tee -a /etc/fstab
+echo " "
+echo "###- Verify partition -###"
+lsblk -o NAME,HCTL,SIZE,MOUNTPOINT | grep -i "sd"

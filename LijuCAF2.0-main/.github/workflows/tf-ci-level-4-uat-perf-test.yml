@@ -1,0 +1,36 @@
+name: 'Level 4 UAT PT CI'
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/level-4/uat-perf-test/**'
+
+env:
+    working-directory: 'src/level-4/uat-perf-test'
+
+jobs:
+  terraform-unit-tests:
+    name: 'Terraform CI'
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      run: terraform -chdir=${{env.working-directory}} init -backend=false
+
+    # Validate terraform files
+    - name: Terraform Validate
+      run: terraform validate
+
+    # Checks that all Terraform configuration files adhere to a canonical format
+    - name: Terraform Format
+      run: terraform -chdir=${{env.working-directory}} fmt -check -recursive

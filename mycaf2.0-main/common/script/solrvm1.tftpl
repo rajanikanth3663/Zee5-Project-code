@@ -1,0 +1,42 @@
+#! /bin/bash
+
+parted /dev/sda --script mklabel gpt mkpart primary ext4 0% 100%
+mkfs.ext4 /dev/sda
+partprobe /dev/sda
+ 
+parted /dev/sdb --script mklabel gpt mkpart primary ext4 0% 100%
+mkfs.ext4 /dev/sdb
+partprobe /dev/sdb
+
+
+log_disk=scsi-36002248087cc09d99d7e34d399a74a1d
+log_disk_mount_path=/var/solr/logs
+log_disk_owner=solr
+data_disk=scsi-360022480d63fe4683b13fa3e2561d115
+data_disk_mount_path=/var/solr/data
+data_disk_owner=solr
+if [ $(ls -1 /dev/disk/by-id|grep -ic $data_disk) -eq 1 ]
+then
+disk_uuid=$(blkid /dev/disk/by-id/$data_disk|grep UUID|awk '{print $2}'|awk -F'"' '{print $2}')
+if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]
+then
+mkdir -p $data_disk_mount_path
+echo "UUID=$disk_uuid $data_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab
+fi
+fi
+if [ $(ls -1 /dev/disk/by-id|grep -ic $log_disk) -eq 1 ]
+then
+disk_uuid=$(blkid /dev/disk/by-id/$log_disk|grep UUID|awk '{print $2}'|awk -F'"' '{print $2}')
+if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]
+then
+log
+mkdir -p $log_disk_mount_path
+echo "UUID=$disk_uuid $log_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab
+fi
+fi
+mount -a
+chown -R $data_disk_owner:$data_disk_owner $data_disk_mount_path
+chmod -R 755 $data_disk_mount_path
+chown -R $log_disk_owner:$log_disk_owner $log_disk_mount_path
+chmod -R 755 $log_disk_mount_path
+echo "completed"

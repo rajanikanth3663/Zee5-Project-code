@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# Define disk variables
+log_disk=${log_disk}
+data_disk=${data_disk}
+
+# Redirect stdout and stderr to a log file
+exec &>> /var/log/disk_setup.log
+
+# Log the output of lsscsi
+lsscsi_output=$(lsscsi --scsi_id)
+
+# Log the output of lsscsi for troubleshooting
+echo "lsscsi output: $lsscsi_output"
+
+# Extract SCSI IDs and format the output
+log_disk_scsi="scsi-$(echo "$lsscsi_output" | grep '\[1:0:0:2\]' | awk '{print $NF}')"
+data_disk_scsi="scsi-$(echo "$lsscsi_output" | grep '\[1:0:0:3\]' | awk '{print $NF}')"
+
+echo "log_disk_scsi=$log_disk_scsi"
+echo "data_disk_scsi=$data_disk_scsi"
+
+log_disk_mount_path=/opt/zookeeper/logs
+log_disk_owner=zookeeper
+data_disk_mount_path=/var/zk
+data_disk_owner=zookeeper
+
+# Partition and format log disk
+parted $log_disk --script mklabel gpt mkpart primary ext4 0% 100% && echo "Partitioned $log_disk successfully" || echo "Error partitioning $log_disk"
+mkfs.ext4 -F $log_disk && echo "Formatted $log_disk successfully" || echo "Error formatting $log_disk"
+partprobe $log_disk
+
+# Partition and format data disk
+parted $data_disk --script mklabel gpt mkpart primary ext4 0% 100% && echo "Partitioned $data_disk successfully" || echo "Error partitioning $data_disk"
+mkfs.ext4 -F $data_disk && echo "Formatted $data_disk successfully" || echo "Error formatting $data_disk"
+partprobe $data_disk
+
+# Check and configure data disk
+if [ $(ls -1 /dev/disk/by-id | grep -ic $data_disk_scsi) -eq 1 ]; then
+    disk_uuid=$(blkid /dev/disk/by-id/$data_disk_scsi | grep UUID | awk '{print $2}' | awk -F'"' '{print $2}')
+    if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]; then
+        mkdir -p $data_disk_mount_path
+        echo "UUID=$disk_uuid $data_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab && echo "Configured data disk successfully" || echo "Error configuring data disk"
+    fi
+fi
+
+# Check and configure log disk
+if [ $(ls -1 /dev/disk/by-id | grep -ic $log_disk_scsi) -eq 1 ]; then
+    disk_uuid=$(blkid /dev/disk/by-id/$log_disk_scsi | grep UUID | awk '{print $2}' | awk -F'"' '{print $2}')
+    if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]; then
+        mkdir -p $log_disk_mount_path
+        echo "UUID=$disk_uuid $log_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab && echo "Configured log disk successfully" || echo "Error configuring log disk"
+    fi
+fi
+
+# Mount all file systems listed in /etc/fstab
+mount -a && echo "Mounted all file systems successfully" || echo "Error mounting file systems"
+
+# Set ownership and permissions for data disk
+chown -R $data_disk_owner:$data_disk_owner $data_disk_mount_path && echo "Set ownership for data disk successfully" || echo "Error setting ownership for data disk"
+chmod -R 755 $data_disk_mount_path && echo "Set permissions for data disk successfully" || echo "Error setting permissions for data disk"
+
+# Set ownership and permissions for log disk
+chown -R $log_disk_owner:$log_disk_owner $log_disk_mount_path && echo "Set ownership for log disk successfully" || echo "Error setting ownership for log disk"
+chmod -R 755 $log_disk_mount_path && echo "Set permissions for log disk successfully" || echo "Error setting permissions for log disk"
+
+echo "completed"
+
+id=$( echo `hostname` | awk '{print substr($0,length,1)}' )
+echo $id >> /var/zk/data/myid
+
+# Check if zoo.cfg file exists
+if test -f "/opt/zookeeper/conf/zoo.cfg"; then
+    # Rename zoo.cfg file
+    mv /opt/zookeeper/conf/zoo.cfg /opt/zookeeper/conf/zoo.cfg.old
+fi
+
+# Create a new zoo.cfg file with the specified configurations
+cat <<EOF > /opt/zookeeper/conf/zoo.cfg
+tickTime=2000
+dataDir=/var/zk/data
+clientPort=2181
+
+initLimit=50
+syncLimit=200
+maxClientCnxns=1000
+ 
+#https://solr.apache.org/guide/solr/latest/deployment-guide/zookeeper-ensemble.html#ensemble-configuration
+4lw.commands.whitelist=mntr,conf,ruok
+ 
+#https://solr.apache.org/guide/solr/latest/deployment-guide/zookeeper-ensemble.html#increasing-the-file-size-limit
+jute.maxbuffer=0x9fffff
+ 
+#ZK_SERVERS
+server.1=10.171.117.19:2881:3881
+server.2=10.171.117.17:2881:3881
+server.3=10.171.117.18:2881:3881
+EOF

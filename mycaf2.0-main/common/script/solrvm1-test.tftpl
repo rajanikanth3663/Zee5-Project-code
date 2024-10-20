@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Redirect stdout and stderr to a log file
+exec &>> /var/log/disk_setup.log
+
+# Partition and format /dev/sda
+parted /dev/sda --script mklabel gpt mkpart primary ext4 0% 100% && echo "Partitioned /dev/sda successfully" || echo "Error partitioning /dev/sda"
+mkfs.ext4 -F /dev/sda && echo "Formatted /dev/sda successfully" || echo "Error formatting /dev/sda"
+partprobe /dev/sda
+
+# Partition and format /dev/sdb
+parted /dev/sdb --script mklabel gpt mkpart primary ext4 0% 100% && echo "Partitioned /dev/sdb successfully" || echo "Error partitioning /dev/sdb"
+mkfs.ext4 -F /dev/sdb && echo "Formatted /dev/sdb successfully" || echo "Error formatting /dev/sdb"
+partprobe /dev/sdb
+
+# Set variables for disk configuration
+log_disk=scsi-36002248087cc09d99d7e34d399a74a1d
+log_disk_mount_path=/var/solr/logs
+log_disk_owner=solr
+data_disk=scsi-360022480d63fe4683b13fa3e2561d115
+data_disk_mount_path=/var/solr/data
+data_disk_owner=solr
+
+# Check and configure data disk
+if [ $(ls -1 /dev/disk/by-id | grep -ic $data_disk) -eq 1 ]; then
+    disk_uuid=$(blkid /dev/disk/by-id/$data_disk | grep UUID | awk '{print $2}' | awk -F'"' '{print $2}')
+    if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]; then
+        mkdir -p $data_disk_mount_path
+        echo "UUID=$disk_uuid $data_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab && echo "Configured data disk successfully" || echo "Error configuring data disk"
+    fi
+fi
+
+# Check and configure log disk
+if [ $(ls -1 /dev/disk/by-id | grep -ic $log_disk) -eq 1 ]; then
+    disk_uuid=$(blkid /dev/disk/by-id/$log_disk | grep UUID | awk '{print $2}' | awk -F'"' '{print $2}')
+    if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]; then
+        mkdir -p $log_disk_mount_path
+        echo "UUID=$disk_uuid $log_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab && echo "Configured log disk successfully" || echo "Error configuring log disk"
+    fi
+fi
+
+# Mount all file systems listed in /etc/fstab
+mount -a && echo "Mounted all file systems successfully" || echo "Error mounting file systems"
+
+# Set ownership and permissions for data disk
+chown -R $data_disk_owner:$data_disk_owner $data_disk_mount_path && echo "Set ownership for data disk successfully" || echo "Error setting ownership for data disk"
+chmod -R 755 $data_disk_mount_path && echo "Set permissions for data disk successfully" || echo "Error setting permissions for data disk"
+
+# Set ownership and permissions for log disk
+chown -R $log_disk_owner:$log_disk_owner $log_disk_mount_path && echo "Set ownership for log disk successfully" || echo "Error setting ownership for log disk"
+chmod -R 755 $log_disk_mount_path && echo "Set permissions for log disk successfully" || echo "Error setting permissions for log disk"
+
+echo "completed"

@@ -1,0 +1,64 @@
+name: Terraform Import
+
+on:
+  workflow_dispatch:
+    inputs:
+      directory:
+        description: "Name of the working directory"
+        required: true
+        default: "directory"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_CLIENT_ID: "${{ secrets.ARM_CLIENT_ID }}"
+  ARM_TENANT_ID: "${{ secrets.ARM_TENANT_ID }}"
+  ARM_CLIENT_SECRET: "${{ secrets.ARM_CLIENT_SECRET }}"
+  ARM_SUBSCRIPTION_ID: "xxx-xxx-xx-xx"
+  TF_VAR_TFSTATE_RESOURCE_GROUP_NAME: "${{ secrets.TFSTATE_RESOURCE_GROUP_NAME }}"
+  TF_VAR_TFSTATE_STORAGE_ACCOUNT_NAME: "${{ secrets.TFSTATE_STORAGE_ACCOUNT_NAME }}"
+  TF_VAR_TFSTATE_STORAGE_ACCOUNT_KEY: "${{ secrets.TFSTATE_STORAGE_ACCOUNT_KEY }}"
+  working-directory: "${{ github.event.inputs.directory }}"
+
+jobs:
+  terraform-import:
+    name: "Terraform Import"
+    runs-on: ubuntulatest
+    env:
+      ARM_SKIP_PROVIDER_REGISTRATION: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Az CLI Login
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ env.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ env.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure SSH
+        run: |
+          mkdir -p /home/runner/.ssh/
+          sudo chown -R "runner:docker" /home/runner/.ssh/
+
+      - name: Setup SSH
+        uses: MrSquaare/ssh-setup-action@v1
+        with:
+          host: github.com
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Terraform Init
+        run: terraform -chdir=${{env.working-directory}} init -backend-config=resource_group_name="${{env.TF_VAR_TFSTATE_RESOURCE_GROUP_NAME}}" -backend-config=storage_account_name="${{env.TF_VAR_TFSTATE_STORAGE_ACCOUNT_NAME}}" -backend-config=access_key="${{env.TF_VAR_TFSTATE_STORAGE_ACCOUNT_KEY}}" -backend-config=subscription_id="${{ env.ARM_SUBSCRIPTION_ID }}"
+
+      - name: Terraform Import
+        run: |
+            terraform -chdir=${{env.working-directory}} import module.diagnostic-setting[\"diag-service-0001\"].azurerm_monitor_diagnostic_setting.this           "/subscriptions/xx-xx-xx-/resourceGroups/rg-service-0001/providers/Microsoft.Cache/redisEnterprise/redisenter-service-0001|diag-service-0001"
+            

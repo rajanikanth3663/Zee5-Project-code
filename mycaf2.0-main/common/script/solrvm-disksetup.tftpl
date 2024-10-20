@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# Define disk variables
+log_disk=${log_disk}
+data_disk=${data_disk}
+
+# Redirect stdout and stderr to a log file
+exec &>> /var/log/disk_setup.log
+
+# Log the output of lsscsi
+lsscsi_output=$(lsscsi --scsi_id)
+
+# Log the output of lsscsi for troubleshooting
+echo "lsscsi output: $lsscsi_output"
+
+# Extract SCSI IDs and format the output
+log_disk_scsi="scsi-$(echo "$lsscsi_output" | grep '\[1:0:0:2\]' | awk '{print $NF}')"
+data_disk_scsi="scsi-$(echo "$lsscsi_output" | grep '\[1:0:0:3\]' | awk '{print $NF}')"
+
+echo "log_disk_scsi=$log_disk_scsi"
+echo "data_disk_scsi=$data_disk_scsi"
+
+# Set variables for disk configuration
+log_disk_mount_path="/var/solr/logs"
+log_disk_owner="solr"
+data_disk_mount_path="/var/solr/data"
+data_disk_owner="solr"
+
+# Partition and format log disk
+parted $log_disk --script mklabel gpt mkpart primary ext4 0% 100% && echo "Partitioned $log_disk successfully" || echo "Error partitioning $log_disk"
+mkfs.ext4 -F $log_disk && echo "Formatted $log_disk successfully" || echo "Error formatting $log_disk"
+partprobe $log_disk
+
+# Partition and format data disk
+parted $data_disk --script mklabel gpt mkpart primary ext4 0% 100% && echo "Partitioned $data_disk successfully" || echo "Error partitioning $data_disk"
+mkfs.ext4 -F $data_disk && echo "Formatted $data_disk successfully" || echo "Error formatting $data_disk"
+partprobe $data_disk
+
+# Check and configure data disk
+if [ $(ls -1 /dev/disk/by-id | grep -ic $data_disk_scsi) -eq 1 ]; then
+    disk_uuid=$(blkid /dev/disk/by-id/$data_disk_scsi | grep UUID | awk '{print $2}' | awk -F'"' '{print $2}')
+    if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]; then
+        mkdir -p $data_disk_mount_path
+        echo "UUID=$disk_uuid $data_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab && echo "Configured data disk successfully" || echo "Error configuring data disk"
+    fi
+fi
+
+# Check and configure log disk
+if [ $(ls -1 /dev/disk/by-id | grep -ic $log_disk_scsi) -eq 1 ]; then
+    disk_uuid=$(blkid /dev/disk/by-id/$log_disk_scsi | grep UUID | awk '{print $2}' | awk -F'"' '{print $2}')
+    if [ $(grep -ic $disk_uuid /etc/fstab) -eq 0 ]; then
+        mkdir -p $log_disk_mount_path
+        echo "UUID=$disk_uuid $log_disk_mount_path ext4 discard,defaults 0 0" >> /etc/fstab && echo "Configured log disk successfully" || echo "Error configuring log disk"
+    fi
+fi
+
+# Mount all file systems listed in /etc/fstab
+mount -a && echo "Mounted all file systems successfully" || echo "Error mounting file systems"
+
+# Set ownership and permissions for data disk
+chown -R $data_disk_owner:$data_disk_owner $data_disk_mount_path && echo "Set ownership for data disk successfully" || echo "Error setting ownership for data disk"
+chmod -R 755 $data_disk_mount_path && echo "Set permissions for data disk successfully" || echo "Error setting permissions for data disk"
+
+# Set ownership and permissions for log disk
+chown -R $log_disk_owner:$log_disk_owner $log_disk_mount_path && echo "Set ownership for log disk successfully" || echo "Error setting ownership for log disk"
+chmod -R 755 $log_disk_mount_path && echo "Set permissions for log disk successfully" || echo "Error setting permissions for log disk"
+
+echo "completed"
+
+
+# Check if solr.in.sh file exists
+if test -f "/etc/default/solr.in.sh"; then
+    # Rename solr.in.sh file
+    mv /etc/default/solr.in.sh /etc/default/solr.in.sh.bak_02022024
+fi
+
+# $SOLR_OPTS='$SOLR_OPTS'
+
+# echo $SOLR_OPTS
+# Create a new solr.in.sh file with the specified configurations
+cat <<EOF > /etc/default/solr.in.sh
+#SOLR_JAVA_HOME=""
+SOLR_HEAP="2g"
+ZK_HOST="10.171.117.19:2881:3881,10.171.117.17:2881:3881,10.171.117.18:2881:3881/solr"
+ZK_CREATE_CHROOT=true
+ZK_CLIENT_TIMEOUT="30000"
+SOLR_TIMEZONE="IST"
+# mount data directory on /var/solr/data
+SOLR_HOME=/var/solr/data
+SOLR_LOGS_DIR=/var/solr/logs
+SOLR_REQUESTLOG_ENABLED=true
+SOLR_PORT=8983
+SOLR_JETTY_HOST="0.0.0.0"
+# Environment should come from config dev, test,stage, prod
+SOLR_OPTS="\$SOLR_OPTS -Dsolr.environment=dev"
+EOF
+
+chown -R solr:solr /etc/default/solr.in.sh

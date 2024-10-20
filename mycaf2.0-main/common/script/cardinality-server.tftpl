@@ -1,0 +1,101 @@
+#!/bin/bash
+FILE_SYSTEM=${file_system}
+DISK_PARTITION=${disk_partition}
+MOUNT_POINT_NAME=${mount_point_name}
+DISK_PARTITION2=sdd
+MOUNT_POINT_NAME2=mnt2
+
+echo " "
+echo "...........###########################################.........."
+echo ".........................MOUNT DISKS......................"
+echo "...........###########################################.........."
+echo " "
+echo "###- Partition and Format the disk1 -###"
+sudo parted /dev/$DISK_PARTITION --script mklabel gpt mkpart "$FILE_SYSTEM"part $FILE_SYSTEM 0% 100%
+sudo mkfs.$FILE_SYSTEM /dev/"$DISK_PARTITION"1
+sudo partprobe /dev/"$DISK_PARTITION"1
+echo " "
+echo "###- Mount disk#1 -###"
+sudo mkdir /$MOUNT_POINT_NAME
+sudo mount /dev/"$DISK_PARTITION"1 /$MOUNT_POINT_NAME
+echo " "
+echo "###- Extract UUID and save it in variable -###"
+uuid1=$(sudo blkid | grep -i ""$DISK_PARTITION"1" | awk '{print $2}' | tr -d '"' | awk '{print $1"   /'$MOUNT_POINT_NAME'   '$FILE_SYSTEM'   defaults,nofail   1   2"}')
+echo " "
+echo "###- Partition and Format the disk2 -###"
+sudo parted /dev/$DISK_PARTITION2 --script mklabel gpt mkpart "$FILE_SYSTEM"part $FILE_SYSTEM 0% 100%
+sudo mkfs.$FILE_SYSTEM /dev/"$DISK_PARTITION2"1
+sudo partprobe /dev/"$DISK_PARTITION2"1
+echo " "
+echo "###- Mount the disk -###"
+sudo mkdir /$MOUNT_POINT_NAME2
+sudo mount /dev/"$DISK_PARTITION2"1 /$MOUNT_POINT_NAME2
+echo " "
+echo "###- Extract UUID and save it in variable -###"
+uuid2=$(sudo blkid | grep -i ""$DISK_PARTITION2"1" | awk '{print $2}' | tr -d '"' | awk '{print $1"   /'$MOUNT_POINT_NAME2'   '$FILE_SYSTEM'   defaults,nofail   1   2"}')
+echo " "
+echo "###- Backup of org fstab file -###"
+sudo cp /etc/fstab /etc/fstab_backup
+echo " "
+echo "###- Append UUIDs to fstab -###"
+echo $uuid1 | sudo tee -a /etc/fstab
+echo $uuid2 | sudo tee -a /etc/fstab
+echo " "
+echo "###- Verify partition -###"
+lsblk -o NAME,HCTL,SIZE,MOUNTPOINT | grep -i "sd"
+
+echo " "
+echo "...........###########################################.........."
+echo ".......................CONFIGURE CARDINALITY...................."
+echo "...........###########################################.........."
+echo " "
+sudo su
+if [ -f "/etc/needrestart/needrestart.conf" ];
+then
+	sed -i "/#\$nrconf{restart} = 'i';/s/.*/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
+	sed -i "s/#\$nrconf{kernelhints} = -1;/\$nrconf{kernelhints} = -1;/g" /etc/needrestart/needrestart.conf
+fi
+echo -ne '\n' | apt update && apt upgrade -y
+apt install software-properties-common ca-certificates lsb-release apt-transport-https -y -y
+apt install apache2 -y
+systemctl start apache2
+apt update
+
+#Java 1.8
+apt install openjdk-8-jre-headless -y
+apt update
+
+#Python
+#apt-get autoremove --purge
+#apt-get remove python3.10 -y
+#apt-get clean
+#apt-get autoremove -y
+
+apt install build-essential checkinstall -y
+apt install libreadline-gplv2-dev libncursesw5-dev libssl-dev libsqlite3-dev tk-dev libgdbm-dev libc6-dev libbz2-dev -y
+cd /var/lib/waagent/custom-script/download/0/
+#wget https://www.python.org/ftp/python/3.6.0/Python-3.6.0.tar.xz
+tar xvf Python-3.6.0.tar.xz
+cd Python-3.6.0/
+./configure
+make altinstall
+mkdir /vmax_logs
+chmod -R 777 /vmax_logs
+
+echo " "
+echo "...........###########################################.........."
+echo "...........................INSTALL AZ CLI........................"
+echo "...........###########################################.........."
+echo " "
+sudo apt-get update
+sudo apt-get install ca-certificates curl apt-transport-https lsb-release gnupg
+
+sudo mkdir -p /etc/apt/keyrings
+curl -sLS https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/microsoft.gpg > /dev/null
+sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
+
+AZ_DIST=$(lsb_release -cs)
+echo "deb [arch=`dpkg --print-architecture` signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ $AZ_DIST main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
+
+sudo apt-get update
+sudo apt-get install azure-cli

@@ -1,0 +1,302 @@
+name: CD Multifolder
+on:
+    workflow_dispatch:
+    pull_request:
+      branches:
+        - uat
+    #push:
+    #  paths-ignore:
+    #    - '.github/**'
+    #    - 'src/**/shared/**'
+env:
+  ARM_CLIENT_ID: "${{ secrets.ARM_CLIENT_ID }}"
+  ARM_TENANT_ID: "${{ secrets.ARM_TENANT_ID }}"
+  ARM_CLIENT_SECRET: "${{ secrets.ARM_CLIENT_SECRET }}"
+  ARM_SUBSCRIPTION_ID: "xxx-xxx-xx-xx-"
+  TF_VAR_TFSTATE_RESOURCE_GROUP_NAME: "${{ secrets.TFSTATE_RESOURCE_GROUP_NAME }}"
+  TF_VAR_TFSTATE_STORAGE_ACCOUNT_NAME: "${{ secrets.TFSTATE_STORAGE_ACCOUNT_NAME }}"
+  TF_VAR_TFSTATE_STORAGE_ACCOUNT_KEY: "${{ secrets.TFSTATE_STORAGE_ACCOUNT_KEY }}"
+jobs:
+    triggerjob:
+        name: 'CD Multifolder'
+        runs-on: ubuntu-latest
+        outputs:
+          folderslist: ${{steps.preparelist.outputs.folderslist}}
+          uniqfolderslist: ${{steps.preparelist.outputs.uniqfolderslist}}
+        steps:
+            # Checkout the repository to the GitHub Actions runner
+              - name: 'Checkout'
+                uses: actions/checkout@v2
+                with:
+                    fetch-depth: 0
+              - name: Check for changes
+                id: preparelist
+                run: |
+                    sudo apt-get update
+                    sudo apt-get install jq  -y
+                    git diff --name-only ${{ github.event.after }} ${{ github.event.before }} > committedfiles.txt
+                    filelist="./committedfiles.txt"
+                    echo "Modified File list"
+                    cat committedfiles.txt
+                    export sharedfolder=0
+                    while IFS= read -r currentline
+                    do
+                      if [[ ${currentline} != ".github"* ]] && [[ ${currentline} != *"shared" ]];then
+                        echo $(dirname ${currentline}),
+                      fi
+                    done < "$filelist" > folderlist.txt
+                    if [[ -z $(grep '[^[:space:]]' folderlist.txt) ]] ; then
+                      echo "No service folders found in the commit, hence exiting"
+                      exit 0
+                    fi
+                    if [[ $sharedfolder -eq 1 ]];then
+                      sed -i 's/^/shared,\n/' folderlist.txt
+                    fi
+                    echo "Unique  Folderlist"
+                    cat folderlist.txt
+                    sort folderlist.txt | uniq -i > uniqfolderlist.txt
+                    jq -Rs '[ split("\n")[] | select(length > 0) | split(",") | {iteration: .[0]} ]' uniqfolderlist.txt | tr -d '\n' > uniqfolderlist.json
+                    echo "folderslist=`cat uniqfolderlist.json`" >> $GITHUB_OUTPUT
+                    tr  '\n' '~'  < uniqfolderlist.txt > uniqfolderlist2.txt
+                    truncate -s-1 uniqfolderlist2.txt
+                    echo "uniqfolderslist=`cat uniqfolderlist2.txt`" >> $GITHUB_OUTPUT
+    tfplanjob:
+      needs: triggerjob
+      name: 'Terraform Plan'
+      runs-on: zee5-arc-infra-spoke-nonprod
+      strategy:
+        #max-parallel: 1
+        matrix:
+          folder: ${{fromJson(needs.triggerjob.outputs.folderslist)}}
+      steps:
+        - name: 'Checkout'
+          uses: actions/checkout@v2
+        - name: "Folder Check"
+          id: foldercheck
+          run: |
+            currentfolder="${{matrix.folder.iteration}}"
+            cd $currentfolder
+            echo "currentfolder=$currentfolder" >>  $GITHUB_ENV
+            echo "pwd"
+            pwd
+            echo "File list"
+            ls
+            echo "tfplancurrentfolder=$currentfolder" >> $GITHUB_OUTPUT
+        # Az CLI Login
+        - name: Az CLI Login
+          uses: azure/login@v1
+          with:
+                creds: '{"clientId":"${{ env.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ env.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+        - name: Setup Terraform
+          uses: hashicorp/setup-terraform@v3
+          with:
+            terraform_wrapper: false
+        - name: Configure SSH
+          run: |
+            mkdir -p /home/runner/.ssh/
+            sudo chown -R "runner:docker" /home/runner/.ssh/
+        - name: SetOutput Variables
+          id: setoutput
+          run: |
+            sudo apt-get update
+            sudo apt-get install jq  -y
+            echo "$currentfolder," > folders.txt
+            cat folders.txt
+            jq -Rs '[ split("\n")[] | select(length > 0) | split(",") | {iteration: .[0]} ]' folders.txt | tr -d '\n' > folders.json
+            echo "Uniq Folders list"
+            echo "folderslist=`cat folders.json`" >> $GITHUB_OUTPUT
+            echo ${{needs.triggerjob.outputs.uniqfolderslist}} > uniqfolderlist.txt
+            cat uniqfolderlist.txt
+            jq -Rs '[ split("~")[] | select(length > 0) | split(",") | {iteration: .[0]} ]' uniqfolderlist.txt | tr -d '\n' > uniqfolderlist.json
+            echo "allfolderslist=`cat uniqfolderlist.json`" >> $GITHUB_OUTPUT
+            export foldername=${currentfolder////-}
+            echo "foldername=$foldername" > $GITHUB_ENV
+        # Shared module access    
+        - name: Setup SSH
+          uses: MrSquaare/ssh-setup-action@v1
+          with:
+            host: github.com
+            private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+        
+        - name: Terraform Init
+          run: terraform -chdir=$currentfolder init -backend-config=resource_group_name="${{env.TF_VAR_TFSTATE_RESOURCE_GROUP_NAME}}" -backend-config=storage_account_name="${{env.TF_VAR_TFSTATE_STORAGE_ACCOUNT_NAME}}" -backend-config=access_key="${{env.TF_VAR_TFSTATE_STORAGE_ACCOUNT_KEY}}" -backend-config=subscription_id="${{ env.ARM_SUBSCRIPTION_ID }}"
+  
+        - name: Terraform Format
+          run: terraform -chdir=$currentfolder fmt -check
+    
+        # Generates an execution plan for Terraform
+        # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+        - name: Terraform Plan
+          id: tf-plan
+          run: |
+    
+            echo "Working directory: $currentfolder"
+    
+            export exitcode=0
+    
+            if [[ "$currentfolder" == "src/uat/shared" || 
+                  "$currentfolder" == "src/dev/shared" || 
+                  "$currentfolder" == "src/qa/shared" ]]; then
+              terraform -chdir=$currentfolder plan -detailed-exitcode -no-color -var vm_admin_password="${{ secrets.VM_ADMIN_PWD }}" \
+              -var POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
+              -var MYSQL_PASSWORD="${{ secrets.MYSQL_PASSWORD }}" \
+              -var PAAS_SQL_PASSWORD="${{ secrets.PAAS_SQL_PASSWORD }}" \
+              -var SQLMI_PASSWORD="${{ secrets.SQLMI_PASSWORD }}" \
+              -out tfplan || export exitcode=$?
+            else
+              terraform -chdir=$currentfolder plan -detailed-exitcode -no-color -out tfplan || export exitcode=$?
+            fi
+    
+            echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+            
+            if [ $exitcode -eq 1 ]; then
+              echo Terraform Plan Failed!
+              exit 1
+            else 
+              exit 0
+            fi
+            
+        # Save plan to artifacts  
+        - name: Publish Terraform Plan
+          uses: actions/upload-artifact@v4
+          with:
+            name: ${{env.foldername}}-tfplan
+            path: ${{env.currentfolder}}/tfplan
+            
+            
+        # Create string output of Terraform Plan
+        - name: Create String Output
+          id: tf-plan-string
+          run: |
+            TERRAFORM_PLAN=$(terraform -chdir=$currentfolder show -no-color tfplan)
+            
+            delimiter="$(openssl rand -hex 8)"
+            echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
+            echo "## Terraform Plan Output" >> $GITHUB_OUTPUT
+            echo "<details><summary>Click to expand</summary>" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo '```terraform' >> $GITHUB_OUTPUT
+            echo "$TERRAFORM_PLAN" >> $GITHUB_OUTPUT
+            echo '```' >> $GITHUB_OUTPUT
+            echo "</details>" >> $GITHUB_OUTPUT
+            echo "${delimiter}" >> $GITHUB_OUTPUT
+            
+        # Publish Terraform Plan as task summary
+        - name: Publish Terraform Plan to Task Summary
+          continue-on-error: true # GITHUB_STEP_SUMMARY has a limit of 1MB, so this step may fail if the plan is too large
+          env:
+            SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
+          run: |
+            echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+          
+        #If this is a PR post the changes
+        - name: Push Terraform Output to PR
+          if: github.ref != 'refs/heads/uat'
+          uses: actions/github-script@v6
+          env:
+            SUMMARY: "${{ steps.tf-plan-string.outputs.summary }}"
+          with:
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+              script: |
+                const body = `${process.env.SUMMARY}`;
+                github.rest.issues.createComment({
+                    issue_number: context.issue.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: body
+                })
+                
+        # Az CLI Logout
+        - name: Az CLI Logout
+          if: always()
+          run: |
+                az logout  
+      outputs:
+        tfplancurrentfolder: ${{ steps.foldercheck.outputs.tfplancurrentfolder }}
+        folderslist:  ${{ steps.setoutput.outputs.folderslist }}
+        allfolderslist:  ${{ steps.setoutput.outputs.allfolderslist }}
+    terraform-apply:
+        name: 'Terraform Apply'
+        runs-on: ubuntu-latest
+        environment: demo-envt
+        needs: [tfplanjob]
+        strategy:
+          matrix:
+            folder: ${{fromJson(needs.tfplanjob.outputs.allfolderslist)}}
+        steps:
+          - name: 'Checkout'
+            uses: actions/checkout@v2
+          - name: Echo
+            run: |
+                export currentfolder="${{matrix.folder.iteration}}"
+                #export currentfolder=${{ needs.tfplanjob.outputs.tfplancurrentfolder }}
+                echo "Currentfolder - $currentfolder"
+                echo "currentfolder=$currentfolder" >  $GITHUB_ENV
+                cat $GITHUB_ENV
+                echo "folder name"
+                export foldername=${currentfolder////-}
+                echo "foldername=$foldername" >> $GITHUB_ENV  
+                cat $GITHUB_ENV
+          - name: "Folder Check"
+            id: foldercheck2
+            run: |
+              echo $currentfolder
+              echo $foldername
+              cd $currentfolder
+              echo "pwd"
+              pwd
+              echo "File list"
+              ls
+          
+          # Az CLI Login
+          - name: Az CLI Login
+            uses: azure/login@v1
+            with:
+              creds: '{"clientId":"${{ secrets.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ env.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+              
+          # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_wrapper: false
+          
+          - name: Configure SSH
+            run: |
+              mkdir -p /home/runner/.ssh/
+              sudo chown -R "runner:docker" /home/runner/.ssh/
+      
+          # Shared module access    
+          - name: Setup SSH
+            uses: MrSquaare/ssh-setup-action@v1
+            with:
+              host: github.com
+              private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      
+          # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+          - name: Terraform Init
+            run: terraform -chdir=$currentfolder init -backend-config=resource_group_name="${{env.TF_VAR_TFSTATE_RESOURCE_GROUP_NAME}}" -backend-config=storage_account_name="${{env.TF_VAR_TFSTATE_STORAGE_ACCOUNT_NAME}}" -backend-config=access_key="${{env.TF_VAR_TFSTATE_STORAGE_ACCOUNT_KEY}}" -backend-config=subscription_id="${{ env.ARM_SUBSCRIPTION_ID }}"
+      
+          # Download saved plan from artifacts  
+          - name: Download Terraform Plan
+            uses: actions/download-artifact@v4
+            with:
+              name: ${{env.foldername}}-tfplan
+              path: ${{env.currentfolder}}
+      
+          # Terraform Apply
+          - name: Terraform Apply
+            run: |
+              pwd
+              # ls
+              # echo "CD"
+              # cd $currentfolder
+              # pwd
+              # ls
+              terraform -chdir=${{env.currentfolder}} apply -auto-approve tfplan
+          
+          # Az CLI Logout
+          - name: Az CLI Logout
+            if: always()
+            run: |
+              az logout
+      
